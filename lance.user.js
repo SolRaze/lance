@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         lance
 // @namespace    https://github.com/SolRaze/lance
-// @version      0.0.24
-// @description  AI chat toolkit — export, Obsidian sync (silent relay), Enter-as-newline, settings dashboard
+// @version      0.0.25
+// @description  AI chat toolkit — export, Obsidian sync (silent relay), Enter-as-newline, Caveman mode, settings dashboard
 // @author       SolRaze
 // @license      MIT
 // @include      *://chatgpt.com/*
@@ -58,6 +58,7 @@
         shortcuts:    { ctrl: true, meta: true, alt: false },
         obsFolder:    "Chat",
         obsTabCloseMs: 1500,
+        caveman:      { enabled: false, level: 'ultra' },
     };
 
     function loadCfg() {
@@ -67,6 +68,147 @@
     }
     function saveCfg(c) { GM_setValue("lance_cfg", JSON.stringify(c)); }
     let CFG = loadCfg();
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  CAVEMAN MODE
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Mirrors https://github.com/JuliusBrussee/caveman / caveman-web Chrome ext.
+    // When active, prepends the skill prompt to the message before send.
+    // Level persists in CFG. Toggle via UI button or settings dashboard.
+
+    const CAVEMAN_PROMPTS = {
+        lite: `[Caveman lite] Respond without filler or hedging. Keep full sentences and articles. Professional but tight. No pleasantries.\n\n---\n`,
+        full: `[Caveman full] Respond terse like smart caveman. Drop articles, fragments OK, short synonyms. Technical terms exact. Code blocks unchanged.\n\n---\n`,
+        ultra: `[Caveman ultra] CAVEMAN ULTRA. Maximum compression. Short phrases. No filler. No intro/outro. No repetition. Keep all technical facts. Preserve code, commands, errors, paths, names, URLs, numbers, and API names exactly. Use compact bullets. Do not omit important warnings.\n\n---\n`,
+    };
+
+    // Find the active chat textarea / contenteditable for current platform
+    function getChatInput() {
+        if (P === "chatGPT")  return qs('#prompt-textarea');
+        if (P === "claude")   return qs('[contenteditable="true"][data-placeholder]') || qs('div.ProseMirror');
+        if (P === "gemini")   return qs('rich-textarea .ql-editor') || qs('[contenteditable="true"]');
+        if (P === "deepseek") return qs('textarea#chat-input') || qs('textarea') || qs('[contenteditable="true"]');
+        if (P === "grok")     return qs('textarea') || qs('[contenteditable="true"]');
+        if (P === "yuanbao")  return qs('textarea') || qs('[contenteditable="true"]');
+        return qs('textarea') || qs('[contenteditable="true"]');
+    }
+
+    // Inject text at start of input without clobbering existing content.
+    // Uses execCommand for contenteditable (keeps undo history);
+    // direct value manipulation for textarea.
+    function prependToInput(el, prefix) {
+        el.focus();
+        if (el.tagName === 'TEXTAREA') {
+            const cur = el.value;
+            el.value = prefix + cur;
+            el.selectionStart = el.selectionEnd = prefix.length;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        } else {
+            // contenteditable: move cursor to start, insert text
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.setStart(el, 0);
+            range.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            // insertText preserves undo stack
+            if (!document.execCommand('insertText', false, prefix)) {
+                // fallback for browsers blocking execCommand
+                el.textContent = prefix + el.textContent;
+                el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+            }
+        }
+    }
+
+    // Called on every send (keydown Enter+shortcut intercept + button click intercept).
+    // If caveman active and prompt not already present, prepend it.
+    function applyCavemanIfActive() {
+        if (!CFG.caveman?.enabled) return;
+        const el = getChatInput();
+        if (!el) return;
+        const prefix = CAVEMAN_PROMPTS[CFG.caveman.level || 'ultra'];
+        const cur = el.tagName === 'TEXTAREA' ? el.value : el.textContent;
+        // Don't double-inject if already starts with the marker
+        if (cur.startsWith('[Caveman')) return;
+        prependToInput(el, prefix);
+    }
+
+    // Pill button shown next to the export button (fixed, separate draggable)
+    let cavemanPill = null;
+    function updateCavemanPill() {
+        if (!cavemanPill) return;
+        const on = CFG.caveman?.enabled;
+        const lvl = (CFG.caveman?.level || 'ultra').toUpperCase();
+        cavemanPill.innerHTML = `🪨 ${on ? lvl : 'CAVE'}`;
+        cavemanPill.style.background = on
+            ? 'linear-gradient(135deg,#7c3aed,#a78bfa)'
+            : 'rgba(28,28,30,0.88)';
+        cavemanPill.style.boxShadow = on
+            ? '0 0 14px rgba(124,58,237,0.5), 0 4px 16px rgba(0,0,0,0.3)'
+            : '0 4px 16px rgba(0,0,0,0.3)';
+    }
+
+    function initCavemanPill() {
+        if (qs('#lance-caveman-pill')) return;
+        const pill = document.createElement('button');
+        pill.id = 'lance-caveman-pill';
+        Object.assign(pill.style, {
+            position: 'fixed', zIndex: '2147483646',
+            border: '1px solid rgba(255,255,255,0.15)',
+            color: '#fff', borderRadius: '100px',
+            padding: '8px 16px', fontFamily: 'system-ui',
+            fontSize: '13px', fontWeight: '700',
+            cursor: 'pointer', userSelect: 'none',
+            transition: 'background 0.2s, box-shadow 0.2s, transform 0.15s',
+            whiteSpace: 'nowrap', letterSpacing: '0.03em',
+        });
+        // Position below export box by default
+        const sx = GM_getValue('cx', window.innerWidth - 160);
+        const sy = GM_getValue('cy', window.innerHeight - 55);
+        pill.style.left = Math.max(0, Math.min(sx, window.innerWidth  - 120)) + 'px';
+        pill.style.top  = Math.max(0, Math.min(sy, window.innerHeight -  40)) + 'px';
+        cavemanPill = pill;
+        updateCavemanPill();
+
+        // Click: toggle on/off. Long-press (>400ms): cycle level
+        let pressTimer = null;
+        pill.addEventListener('mouseenter', () => { pill.style.transform = 'scale(1.06)'; });
+        pill.addEventListener('mouseleave', () => { pill.style.transform = 'scale(1)'; pressTimer && clearTimeout(pressTimer); });
+        pill.addEventListener('mousedown', () => {
+            pressTimer = setTimeout(() => {
+                pressTimer = null;
+                const levels = ['lite','full','ultra'];
+                const cur = CFG.caveman?.level || 'ultra';
+                CFG.caveman.level = levels[(levels.indexOf(cur) + 1) % levels.length];
+                saveCfg(CFG);
+                updateCavemanPill();
+            }, 500);
+        });
+        pill.addEventListener('click', () => {
+            if (!pressTimer) return; // was long-press, ignore click
+            clearTimeout(pressTimer); pressTimer = null;
+            if (!CFG.caveman) CFG.caveman = { enabled: false, level: 'ultra' };
+            CFG.caveman.enabled = !CFG.caveman.enabled;
+            saveCfg(CFG);
+            updateCavemanPill();
+        });
+
+        // Drag (same pattern as export box)
+        let drag=false, moved=false, px0,py0,pl0,pt0;
+        pill.addEventListener('mousedown', e => { drag=true; moved=false; px0=e.clientX; py0=e.clientY; pl0=pill.offsetLeft; pt0=pill.offsetTop; });
+        document.addEventListener('mousemove', e => {
+            if (!drag) return;
+            const dx=e.clientX-px0, dy=e.clientY-py0;
+            if (Math.abs(dx)>3||Math.abs(dy)>3) moved=true;
+            pill.style.left=(pl0+dx)+'px'; pill.style.top=(pt0+dy)+'px';
+        });
+        document.addEventListener('mouseup', () => {
+            if (drag&&moved) { GM_setValue('cx',pill.offsetLeft); GM_setValue('cy',pill.offsetTop); }
+            drag=false;
+        });
+
+        document.body.appendChild(pill);
+    }
 
     // ─── Filename: YYYYMMDDXXXX ──────────────────────────────────────────────────
     function makeFilename(title, turnCount) {
@@ -326,7 +468,7 @@
                 if (!ev.defaultPrevented) document.execCommand("insertParagraph");
                 return;
             }
-            if (isSendShortcut(e) && isChatGPTTarget(t)) { const sb = findSubmit(); if (sb && !sb.disabled) { e.preventDefault(); e.stopPropagation(); sb.click(); } return; }
+            if (isSendShortcut(e) && isChatGPTTarget(t)) { applyCavemanIfActive(); const sb = findSubmit(); if (sb && !sb.disabled) { e.preventDefault(); e.stopPropagation(); sb.click(); } return; }
             if (isPotentialSend(e) && isChatGPTTarget(t)) { e.preventDefault(); e.stopPropagation(); }
             return;
         }
@@ -344,7 +486,7 @@
             }
             return;
         }
-        if (isSendShortcut(e) && isEditableTarget(t))  { const sb = findSubmit(); if (sb && !sb.disabled) { e.preventDefault(); e.stopPropagation(); sb.click(); } return; }
+        if (isSendShortcut(e) && isEditableTarget(t))  { applyCavemanIfActive(); const sb = findSubmit(); if (sb && !sb.disabled) { e.preventDefault(); e.stopPropagation(); sb.click(); } return; }
         if (isPotentialSend(e) && isEditableTarget(t)) { e.stopPropagation(); }
     }, true);
 
@@ -423,7 +565,7 @@
         htitle.textContent = 'lance';
         Object.assign(htitle.style, {margin:'0',fontSize:'18px',fontWeight:'700',color:fg});
         const ver = document.createElement('span');
-        ver.textContent = 'v0.0.24';
+        ver.textContent = 'v0.0.25';
         Object.assign(ver.style, {fontSize:'11px',opacity:'0.4',marginLeft:'6px'});
         htitle.appendChild(ver);
         const closeBtn = document.createElement('button');
@@ -492,6 +634,37 @@
         closeInp.oninput = () => { CFG.obsTabCloseMs = Math.max(0, parseInt(closeInp.value) || 0); saveCfg(CFG); };
         closeRow.appendChild(closeLbl); closeRow.appendChild(closeInp);
         dlg.appendChild(closeRow);
+
+        // ── Section: Caveman ──
+        dlg.appendChild(section('Caveman Mode'));
+        dlg.appendChild(row('Enable caveman', toggle(CFG.caveman?.enabled ?? false, v => {
+            if (!CFG.caveman) CFG.caveman = { enabled: false, level: 'ultra' };
+            CFG.caveman.enabled = v; saveCfg(CFG); updateCavemanPill();
+        })));
+
+        // Level selector
+        const lvlRow = document.createElement('div');
+        Object.assign(lvlRow.style, {padding:'8px 0',borderBottom:`1px solid ${bd}`,display:'flex',justifyContent:'space-between',alignItems:'center'});
+        const lvlLbl = document.createElement('span'); lvlLbl.textContent = 'Level'; lvlLbl.style.color = fg;
+        const lvlSel = document.createElement('select');
+        Object.assign(lvlSel.style, {background:sbg,border:`1px solid ${bd}`,borderRadius:'6px',color:fg,padding:'4px 8px',fontSize:'13px'});
+        ['lite','full','ultra'].forEach(l => {
+            const opt = document.createElement('option');
+            opt.value = l; opt.textContent = l.charAt(0).toUpperCase()+l.slice(1);
+            if ((CFG.caveman?.level || 'ultra') === l) opt.selected = true;
+            lvlSel.appendChild(opt);
+        });
+        lvlSel.onchange = () => {
+            if (!CFG.caveman) CFG.caveman = { enabled: false, level: 'ultra' };
+            CFG.caveman.level = lvlSel.value; saveCfg(CFG); updateCavemanPill();
+        };
+        lvlRow.appendChild(lvlLbl); lvlRow.appendChild(lvlSel);
+        dlg.appendChild(lvlRow);
+
+        const caveNote = document.createElement('p');
+        caveNote.textContent = 'Pill button: click = toggle, hold 500ms = cycle level.';
+        Object.assign(caveNote.style, {margin:'6px 0 0',fontSize:'11px',opacity:'0.4'});
+        dlg.appendChild(caveNote);
 
         // Footer
         const note = document.createElement('p');
@@ -609,6 +782,6 @@
     if (typeof trustedTypes !== "undefined" && trustedTypes.defaultPolicy === null)
         trustedTypes.createPolicy("default", {createHTML:s=>s, createScriptURL:s=>s, createScript:s=>s});
 
-    setTimeout(init, 1000);
-    setInterval(init, 3000);
+    setTimeout(() => { init(); initCavemanPill(); }, 1000);
+    setInterval(() => { init(); initCavemanPill(); }, 3000);
 })();
