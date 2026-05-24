@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         lance
 // @namespace    https://github.com/SolRaze/lance
-// @version      0.0.22
+// @version      0.0.23
 // @description  AI chat toolkit — export, Obsidian sync (silent relay), Enter-as-newline, settings dashboard
-// @author       user
+// @author       SolRaze
 // @license      MIT
 // @include      *://chatgpt.com/*
 // @include      *://grok.com/*
